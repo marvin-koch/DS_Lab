@@ -16,7 +16,7 @@ accelerate launch train.py \
   --max_train_steps=2000 \
   --lr_scheduler="constant_with_warmup" --lr_warmup_steps=200 \
   --learning_rate=1e-8 --scale_lr \
-  --cache_dir="/export/share/datasets/vision_language/pick_a_pic_v2/" \
+  --cache_dir="/datasets/rapidata" \
   --checkpointing_steps 200 \
   --beta_dpo 5000 \
    --sdxl  \

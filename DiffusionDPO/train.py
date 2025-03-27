@@ -71,6 +71,7 @@ logger = get_logger(__name__, log_level="INFO")
 DATASET_NAME_MAPPING = {
     "yuvalkirstain/pickapic_v1": ("jpg_0", "jpg_1", "label_0", "caption"),
     "yuvalkirstain/pickapic_v2": ("jpg_0", "jpg_1", "label_0", "caption"),
+    "Rapidata/human-coherence-preferences-images": ("image1", "image2", "votes_image1", "prompt"),
 }
 
         
@@ -708,6 +709,20 @@ def main():
 
     # Preprocessing the datasets.
     # We need to tokenize inputs and targets.
+    
+    
+    
+    def determine_label(row):
+        if row['votes_image1'] > row['votes_image2']:
+            return 1  # Label 0 for image1
+        elif row['votes_image1'] < row['votes_image2']:
+            return 0  # Label 1 for image2
+        else:
+            return 0.5  # Label -1 for a tie (optional)
+
+    labels = [determine_label(i) for i in dataset]
+    
+    dataset = dataset.map(lambda x: {'votes_image1': determine_label(x)}, remove_columns=['votes_image2'])
     column_names = dataset[args.split].column_names
 
     # 6. Get the column names for input/target.
@@ -768,10 +783,10 @@ def main():
     
     #### START PREPROCESSING/COLLATION ####
     if args.train_method == 'dpo':
-        print("Ignoring image_column variable, reading from jpg_0 and jpg_1")
+        print("Ignoring image_column variable, reading from image1 and image2")
         def preprocess_train(examples):
             all_pixel_values = []
-            for col_name in ['jpg_0', 'jpg_1']:
+            for col_name in ['image1', 'image2']:
                 images = [Image.open(io.BytesIO(im_bytes)).convert("RGB")
                             for im_bytes in examples[col_name]]
                 pixel_values = [train_transforms(image) for image in images]
@@ -779,7 +794,7 @@ def main():
             # Double on channel dim, jpg_y then jpg_w
             im_tup_iterator = zip(*all_pixel_values)
             combined_pixel_values = []
-            for im_tup, label_0 in zip(im_tup_iterator, examples['label_0']):
+            for im_tup, label_0 in zip(im_tup_iterator, examples['votes_image1']):
                 if label_0==0 and (not args.choice_model): # don't want to flip things if using choice_model for AI feedback
                     im_tup = im_tup[::-1]
                 combined_im = torch.cat(im_tup, dim=0) # no batch dim
@@ -801,7 +816,7 @@ def main():
                 
             if args.choice_model:
                 # If using AIF then deliver image data for choice model to determine if should flip pixel values
-                for k in ['jpg_0', 'jpg_1']:
+                for k in ['image1', 'image2']:
                     return_d[k] = [Image.open(io.BytesIO( example[k])).convert("RGB")
                                    for example in examples]
                 return_d["caption"] = [example["caption"] for example in examples] 
@@ -824,16 +839,25 @@ def main():
                 return scores[1] > scores[0]
             def choice_model_says_flip(batch):
                 assert len(batch['caption'])==1 # Can switch to iteration but not needed for nwo
-                return do_flip(batch['jpg_0'][0], batch['jpg_1'][0], batch['caption'][0])
+                return do_flip(batch['image1'][0], batch['image2'][0], batch['caption'][0])
     elif args.train_method == 'sft':
         def preprocess_train(examples):
             if 'pickapic' in args.dataset_name:
                 images = []
                 # Probably cleaner way to do this iteration
-                for im_0_bytes, im_1_bytes, label_0 in zip(examples['jpg_0'], examples['jpg_1'], examples['label_0']):
+                for im_0_bytes, im_1_bytes, label_0 in zip(examples['image1'], examples['image2'], examples['label_0']):
                     assert label_0 in (0, 1)
                     im_bytes = im_0_bytes if label_0==1 else im_1_bytes
                     images.append(Image.open(io.BytesIO(im_bytes)).convert("RGB"))
+                    
+            elif 'Rapidata' in args.dataset_name:
+                images = []
+                # Probably cleaner way to do this iteration
+                for im_0_bytes, im_1_bytes, label_0 in zip(examples['image1'], examples['image2'], examples['label_0']):
+                    assert label_0 in (0, 1)
+                    im_bytes = im_0_bytes if label_0==1 else im_1_bytes
+                    images.append(Image.open(io.BytesIO(im_bytes)).convert("RGB"))            
+                    
             else:
                 images = [image.convert("RGB") for image in examples[image_column]]
             examples["pixel_values"] = [train_transforms(image) for image in images]
@@ -872,6 +896,25 @@ def main():
                 new_len = dataset[args.split].num_rows
                 print(f"Eliminated {orig_len - new_len}/{orig_len} non-dreamlike gens for Pick-a-pic")
                 
+        if 'Rapidata' in args.dataset_name:
+            # eliminate no-decisions (0.5-0.5 labels)
+            orig_len = dataset[args.split].num_rows
+            not_split_idx = [i for i,label_0 in enumerate(dataset[args.split]['votes_image1'])
+                             if label_0 in (0,1) ]
+            dataset[args.split] = dataset[args.split].select(not_split_idx)
+            new_len = dataset[args.split].num_rows
+            print(f"Eliminated {orig_len - new_len}/{orig_len} split decisions for Pick-a-pic")
+            
+            # Below if if want to train on just the Dreamlike vs dreamlike pairs
+            if args.dreamlike_pairs_only:
+                orig_len = dataset[args.split].num_rows
+                dream_like_idx = [i for i,(m0,m1) in enumerate(zip(dataset[args.split]['model0'],
+                                                                   dataset[args.split]['model1']))
+                                  if ( ('dream' in m0) and ('dream' in m1) )]
+                dataset[args.split] = dataset[args.split].select(dream_like_idx)
+                new_len = dataset[args.split].num_rows
+                print(f"Eliminated {orig_len - new_len}/{orig_len} non-dreamlike gens for Pick-a-pic")
+                           
         if args.max_train_samples is not None:
             dataset[args.split] = dataset[args.split].shuffle(seed=args.seed).select(range(args.max_train_samples))
         # Set the training transforms
